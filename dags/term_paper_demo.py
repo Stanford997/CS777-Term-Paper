@@ -1,11 +1,15 @@
 from airflow import DAG
 from airflow.operators.python import PythonOperator
+from airflow.providers.amazon.aws.sensors.s3 import S3KeySensor
+from airflow.providers.amazon.aws.hooks.s3 import S3Hook
 from airflow.providers.postgres.hooks.postgres import PostgresHook
 from datetime import datetime, timedelta
 
 import pandas as pd
 import yfinance as yf
+import joblib
 from io import StringIO
+from io import BytesIO
 
 default_args = {
     'owner': 'caozhen',
@@ -17,7 +21,7 @@ dag = DAG(
     'term_paper_demo_v2',
     default_args=default_args,
     description='demo for the term paper',
-    start_date=datetime(2024, 3, 10),
+    start_date=datetime(2023, 3, 15),
     schedule_interval='@daily'
 )
 
@@ -168,13 +172,35 @@ def linear_regression_predictor():
     pass
 
 
-def LSTM_predictor():
+def logistic_regression_predictor():
     # Task 4: load model and predict
+    tickers = ['AAPL']
+    minio_conn_id = 'minio_conn'
+    bucket_name = 'airflow'
+    model_key = 'LogisticRegression.pkl'
+
+    minio_hook = S3Hook(minio_conn_id)
+    client = minio_hook.get_conn()
+
+    # Use the client to download the object
+    obj = client.get_object(Bucket=bucket_name, Key=model_key)
+
+    # Read the object's body directly into a BytesIO buffer without decoding
+    model_stream = BytesIO(obj['Body'].read())
+
+    # Load the model from the BytesIO buffer
+    loaded_model = joblib.load(model_stream)
+
+    print(f"Model loaded from MinIO: {model_key}")
+
+
+def LSTM_predictor():
+    # Task 5: load model and predict
     pass
 
 
 def make_investment_decision():
-    # Task 5: Make investment decision based on Task 3 and Task 4
+    # Task 6: Make investment decision based on Task 3 and Task 4
     # predict true when and only when Task 3 and Task 4 predict true
     pass
 
@@ -193,6 +219,17 @@ task2 = PythonOperator(
     dag=dag,
 )
 
+model_sensor = S3KeySensor(
+    task_id='check_models_in_minio',
+    bucket_name='airflow',
+    bucket_key=['LogisticRegression.pkl'],
+    aws_conn_id='minio_conn',
+    mode='poke',
+    poke_interval=10,
+    timeout=180,
+    dag=dag,
+)
+
 task3 = PythonOperator(
     task_id='linear_regression_predictor',
     python_callable=linear_regression_predictor,
@@ -200,14 +237,20 @@ task3 = PythonOperator(
 )
 
 task4 = PythonOperator(
+    task_id='logistic_regression_predictor',
+    python_callable=logistic_regression_predictor,
+    dag=dag,
+)
+
+task5 = PythonOperator(
     task_id='LSTM_predictor',
     python_callable=LSTM_predictor,
     dag=dag,
 )
 
-task5 = PythonOperator(
+task6 = PythonOperator(
     task_id='make_investment_decision',
     python_callable=make_investment_decision,
     dag=dag,
 )
-task1 >> task2 >> [task3, task4] >> task5
+task1 >> task2 >> model_sensor >> [task3, task4, task5] >> task6

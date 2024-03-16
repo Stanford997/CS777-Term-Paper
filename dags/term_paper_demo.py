@@ -23,8 +23,8 @@ dag = DAG(
 
 
 def query_stock_info(**context):
+    tickers = ['AAPL']
     # Task 1: Query stock information from Yahoo Finance
-    ticker = 'AAPL'
     end_date = context['execution_date'].strftime('%Y-%m-%d')
     start_date = (context['execution_date'] - timedelta(days=1)).strftime('%Y-%m-%d')
     print(start_date)
@@ -55,77 +55,57 @@ def query_stock_info(**context):
         print('read ', num_lines, ' lines of data for ticker: ', ticker)
         return df
 
-    def check_and_create_table(conn):
-        cursor = conn.cursor()
-        cursor.execute("SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'stock_info')")
-        table_exists = cursor.fetchone()[0]
-
-        if not table_exists:
-            cursor.execute("""
-                    CREATE TABLE stock_info (
-                        Date DATE,
-                        Year INT,
-                        Month INT,
-                        Day INT,
-                        Weekday VARCHAR(20),
-                        Week_Number VARCHAR(20),
-                        Year_Week VARCHAR(20),
-                        Open FLOAT,
-                        High FLOAT,
-                        Low FLOAT,
-                        Close FLOAT,
-                        Volume BIGINT,
-                        Adj_Close FLOAT,
-                        Return FLOAT,
-                        Short_MA FLOAT,
-                        Long_MA FLOAT
-                    )
-                """)
-            conn.commit()
-            print('Table "stock_info" created successfully!')
-        else:
-            print('Table "stock_info" already exists.')
-
-    df = get_stock(ticker, start_date=start_date, end_date=end_date, s_window=14, l_window=50)
-    context['task_instance'].xcom_push(key='stock_data', value=df)
+    def create_table_if_not_exist():
+        cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stock_info (
+                    Stock_Name VARCHAR(10),
+                    Date DATE,
+                    Year INT,
+                    Month INT,
+                    Day INT,
+                    Weekday VARCHAR(20),
+                    Week_Number VARCHAR(20),
+                    Year_Week VARCHAR(20),
+                    Open FLOAT,
+                    High FLOAT,
+                    Low FLOAT,
+                    Close FLOAT,
+                    Volume BIGINT,
+                    Adj_Close FLOAT,
+                    Return FLOAT,
+                    Short_MA FLOAT,
+                    Long_MA FLOAT
+                )
+            """)
+        return
 
     hook = PostgresHook(postgres_conn_id='postgres_localhost')
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    check_and_create_table(conn)
+    create_table_if_not_exist()
 
-    csv_data = StringIO()
-    df.to_csv(csv_data, sep='\t', index=False, header=False)
-    csv_data.seek(0)
+    for ticker in tickers:
+        df = get_stock(ticker, start_date=start_date, end_date=end_date, s_window=14, l_window=50)
+        df.insert(0, 'Stock_Name', ticker)
+        context['task_instance'].xcom_push(key='stock_data', value=df)
 
-    cursor.execute("""
-            CREATE TEMP TABLE temp_table (
-                Date DATE,
-                Year INT,
-                Month INT,
-                Day INT,
-                Weekday VARCHAR(20),
-                Week_Number VARCHAR(20),
-                Year_Week VARCHAR(20),
-                Open FLOAT,
-                High FLOAT,
-                Low FLOAT,
-                Close FLOAT,
-                Volume BIGINT,
-                Adj_Close FLOAT,
-                Return FLOAT,
-                Short_MA FLOAT,
-                Long_MA FLOAT
-            )
-        """)
+        csv_data = StringIO()
+        df.to_csv(csv_data, sep='\t', index=False, header=False)
+        csv_data.seek(0)
 
-    cursor.copy_from(csv_data, 'temp_table', sep='\t', null='')
-    cursor.execute("""
-            INSERT INTO stock_info (Date, Year, Month, Day, Weekday, Week_Number, Year_Week, Open, High, Low, Close, Volume, Adj_Close, Return, Short_MA, Long_MA)
-            SELECT Date, Year, Month, Day, Weekday, Week_Number, Year_Week, Open, High, Low, Close, Volume, Adj_Close, Return, Short_MA, Long_MA
-            FROM temp_table
-        """)
+        # Check for duplicates before inserting data
+        cursor.execute("""
+            SELECT COUNT(*) FROM stock_info 
+            WHERE Stock_Name = %s AND Date = ANY(%s)
+        """, (ticker, df['Date'].tolist()))
+        num_duplicates = cursor.fetchone()[0]
+
+        if num_duplicates > 0:
+            print(f"Skipping insertion of {num_duplicates} duplicate records.")
+        else:
+            cursor.copy_from(csv_data, 'stock_info', sep='\t', null='')
+            print('Data inserted into PostgreSQL database successfully!')
 
     conn.commit()
     conn.close()
@@ -136,53 +116,46 @@ def query_stock_info(**context):
 def clean_and_process_data(**context):
     # Task 2: Clean and process the queried stock data
     df = context['task_instance'].xcom_pull(task_ids='query_stock_info', key='stock_data')
+    if df.empty:
+        print("DataFrame is empty. Exiting clean_and_process_data function.")
+        return
+
+    df = df[['Stock_Name', 'Date', 'Open', 'Close']]
+    ticker = df['Stock_Name'].iloc[0]
     csv_data = StringIO()
     df.to_csv(csv_data, sep='\t', index=False, header=False)
-    df = df[['Date', 'Open', 'Close']]
 
-    def check_and_create_table(conn):
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT EXISTS (SELECT FROM information_schema.tables WHERE table_name = 'processed_stock_data')")
-        table_exists = cursor.fetchone()[0]
-
-        if not table_exists:
-            cursor.execute("""
-                    CREATE TABLE processed_stock_data (
+    def create_table_if_not_exist():
+        cursor.execute("""
+                CREATE TABLE IF NOT EXISTS processed_stock_data (
+                        Stock_Name VARCHAR(10),
                         Date DATE,
                         Open FLOAT,
                         Close FLOAT
-                    )
-                """)
-            conn.commit()
-            print('Table "processed_stock_data" created successfully!')
-        else:
-            print('Table "processed_stock_data" already exists.')
+                )
+            """)
+        return
 
     hook = PostgresHook(postgres_conn_id='postgres_localhost')
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    check_and_create_table(conn)
+    create_table_if_not_exist()
 
-    cursor.execute("""
-        CREATE TEMP TABLE temp_table (
-            Date DATE,
-            Open FLOAT,
-            Close FLOAT
-        )
-    """)
-
-    csv_data = StringIO()
-    df.to_csv(csv_data, sep='\t', index=False, header=False)
     csv_data.seek(0)
-    cursor.copy_from(csv_data, 'temp_table', sep='\t', null='')
 
+    # Check for duplicates before inserting data
     cursor.execute("""
-        INSERT INTO processed_stock_data (Date, Open, Close)
-        SELECT Date, Open, Close
-        FROM temp_table
-    """)
+        SELECT COUNT(*) FROM processed_stock_data 
+        WHERE Stock_Name = %s AND Date = ANY(%s)
+    """, (ticker, df['Date'].tolist()))
+    num_duplicates = cursor.fetchone()[0]
+
+    if num_duplicates > 0:
+        print(f"Skipping insertion of {num_duplicates} duplicate records.")
+    else:
+        cursor.copy_from(csv_data, 'processed_stock_data', sep='\t', null='')
+        print('Data inserted into PostgreSQL database successfully!')
 
     conn.commit()
     conn.close()

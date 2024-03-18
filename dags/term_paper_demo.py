@@ -26,9 +26,10 @@ dag = DAG(
     schedule_interval='@daily'
 )
 
+tickers = ['AAPL']
+
 
 def query_stock_info(**context):
-    tickers = ['AAPL']
     # Task 1: Query stock information from Yahoo Finance
     end_date = context['execution_date'].strftime('%Y-%m-%d')
     start_date = (context['execution_date'] - timedelta(days=1)).strftime('%Y-%m-%d')
@@ -182,14 +183,8 @@ def load_recent_data_from_postgres(ticker):
     return df
 
 
-def linear_regression_predictor():
+def linear_regression_predictor(**context):
     # Task 3: load model and predict
-    pass
-
-
-def logistic_regression_predictor(**context):
-    # Task 4: load model and predict
-    tickers = ['AAPL']
     minio_conn_id = 'minio_conn'
     bucket_name = 'airflow'
 
@@ -218,6 +213,39 @@ def logistic_regression_predictor(**context):
                               ignore_index=True)
         print(result_df)
         context['task_instance'].xcom_push(key='stock_prediction_logistic_regression', value=result_df)
+
+
+def logistic_regression_predictor(**context):
+    # Task 4: load model and predict
+    minio_conn_id = 'minio_conn'
+    bucket_name = 'airflow'
+
+    result_df = pd.DataFrame(columns=['ticker', 'predicted_labels'])
+
+    for ticker in tickers:
+        model_key = f'LinearRegression_{ticker}.pkl'
+        minio_hook = S3Hook(minio_conn_id)
+        client = minio_hook.get_conn()
+
+        # Use the client to download the object
+        obj = client.get_object(Bucket=bucket_name, Key=model_key)
+
+        # Read the object's body directly into a BytesIO buffer without decoding
+        model_stream = BytesIO(obj['Body'].read())
+
+        # Load the model from the BytesIO buffer
+        loaded_model = joblib.load(model_stream)
+
+        recent_data = load_recent_data_from_postgres(ticker)
+        recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
+        X = recent_data['Price_Diff'].values.reshape(1, -1)
+        predicted_labels = loaded_model.predict(X)[0]
+        predicted_labels = np.where(predicted_labels > 0, 1, 0)
+
+        result_df = pd.concat([result_df, pd.DataFrame({'ticker': [ticker], 'predicted_labels': [predicted_labels]})],
+                              ignore_index=True)
+        print(result_df)
+        context['task_instance'].xcom_push(key='stock_prediction_linear_regression', value=result_df)
 
 
 def LSTM_predictor():
@@ -295,24 +323,28 @@ model_sensor = S3KeySensor(
 task3 = PythonOperator(
     task_id='linear_regression_predictor',
     python_callable=linear_regression_predictor,
+    provide_context=True,
     dag=dag,
 )
 
 task4 = PythonOperator(
     task_id='logistic_regression_predictor',
     python_callable=logistic_regression_predictor,
+    provide_context=True,
     dag=dag,
 )
 
 task5 = PythonOperator(
     task_id='LSTM_predictor',
     python_callable=LSTM_predictor,
+    provide_context=True,
     dag=dag,
 )
 
 task6 = PythonOperator(
     task_id='make_investment_decision',
     python_callable=make_investment_decision,
+    provide_context=True,
     dag=dag,
 )
 task1 >> task2 >> model_sensor >> [task3, task4, task5] >> task6

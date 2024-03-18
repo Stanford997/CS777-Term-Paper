@@ -6,6 +6,7 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from datetime import datetime, timedelta
 
 import pandas as pd
+import numpy as np
 import yfinance as yf
 import joblib
 from io import StringIO
@@ -167,31 +168,56 @@ def clean_and_process_data(**context):
     print('Filtered data inserted into PostgreSQL database successfully!')
 
 
+def load_recent_data_from_postgres(ticker):
+    hook = PostgresHook(postgres_conn_id='postgres_localhost')
+    conn = hook.get_conn()
+    cursor = conn.cursor()
+
+    cursor.execute(f"SELECT * FROM processed_stock_data WHERE Stock_Name = '{ticker}' ORDER BY date DESC LIMIT 5")
+    data = cursor.fetchall()
+    columns = [desc[0] for desc in cursor.description]
+    df = pd.DataFrame(data, columns=columns)
+
+    conn.close()
+    return df
+
+
 def linear_regression_predictor():
     # Task 3: load model and predict
     pass
 
 
-def logistic_regression_predictor():
+def logistic_regression_predictor(**context):
     # Task 4: load model and predict
     tickers = ['AAPL']
     minio_conn_id = 'minio_conn'
     bucket_name = 'airflow'
-    model_key = 'LogisticRegression.pkl'
 
-    minio_hook = S3Hook(minio_conn_id)
-    client = minio_hook.get_conn()
+    result_df = pd.DataFrame(columns=['ticker', 'predicted_labels'])
 
-    # Use the client to download the object
-    obj = client.get_object(Bucket=bucket_name, Key=model_key)
+    for ticker in tickers:
+        model_key = f'LogisticRegression_{ticker}.pkl'
+        minio_hook = S3Hook(minio_conn_id)
+        client = minio_hook.get_conn()
 
-    # Read the object's body directly into a BytesIO buffer without decoding
-    model_stream = BytesIO(obj['Body'].read())
+        # Use the client to download the object
+        obj = client.get_object(Bucket=bucket_name, Key=model_key)
 
-    # Load the model from the BytesIO buffer
-    loaded_model = joblib.load(model_stream)
+        # Read the object's body directly into a BytesIO buffer without decoding
+        model_stream = BytesIO(obj['Body'].read())
 
-    print(f"Model loaded from MinIO: {model_key}")
+        # Load the model from the BytesIO buffer
+        loaded_model = joblib.load(model_stream)
+
+        recent_data = load_recent_data_from_postgres(ticker)
+        recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
+        X = recent_data['Price_Diff'].values.reshape(1, -1)
+        predicted_labels = loaded_model.predict(X)[0]
+
+        result_df = pd.concat([result_df, pd.DataFrame({'ticker': [ticker], 'predicted_labels': [predicted_labels]})],
+                              ignore_index=True)
+        print(result_df)
+        context['task_instance'].xcom_push(key='stock_prediction_logistic_regression', value=result_df)
 
 
 def LSTM_predictor():
@@ -202,6 +228,42 @@ def LSTM_predictor():
 def make_investment_decision():
     # Task 6: Make investment decision based on Task 3 and Task 4
     # predict true when and only when Task 3 and Task 4 predict true
+
+    # def create_table_if_not_exist():
+    #     cursor.execute("""
+    #             CREATE TABLE IF NOT EXISTS stock_prediction (
+    #                     Stock_Name VARCHAR(10),
+    #                     Date DATE,
+    #                     Prediction BOOLEAN
+    #             )
+    #         """)
+    #     return
+
+    # hook = PostgresHook(postgres_conn_id='postgres_localhost')
+    # conn = hook.get_conn()
+    # cursor = conn.cursor()
+    # create_table_if_not_exist()
+    #
+    # csv_data.seek(0)
+    #
+    # # Check for duplicates before inserting data
+    # cursor.execute("""
+    #     SELECT COUNT(*) FROM processed_stock_data
+    #     WHERE Stock_Name = %s AND Date = ANY(%s)
+    # """, (ticker, df['Date'].tolist()))
+    # num_duplicates = cursor.fetchone()[0]
+    #
+    # if num_duplicates > 0:
+    #     print(f"Skipping insertion of {num_duplicates} duplicate records.")
+    # else:
+    #     cursor.copy_from(csv_data, 'processed_stock_data', sep='\t', null='')
+    #     print('Data inserted into PostgreSQL database successfully!')
+    #
+    # conn.commit()
+    # conn.close()
+    #
+    # print('Filtered data inserted into PostgreSQL database successfully!')
+
     pass
 
 

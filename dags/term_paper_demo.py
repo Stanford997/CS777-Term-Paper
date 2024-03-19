@@ -6,7 +6,6 @@ from airflow.providers.postgres.hooks.postgres import PostgresHook
 from datetime import datetime, timedelta
 
 import pandas as pd
-import numpy as np
 import yfinance as yf
 import joblib
 from io import StringIO
@@ -283,7 +282,60 @@ def LSTM_predictor(**context):
 
 def make_investment_decision(**context):
     # Task 6: Make investment decision based on Task 3,4,5
-    pass
+    def create_table_if_not_exist():
+        cursor.execute("""
+                CREATE TABLE IF NOT EXISTS stock_prediction (
+                        Date DATE,
+                        Stock_Name VARCHAR(10),
+                        Prediction BOOLEAN
+                )
+            """)
+        return
+
+    hook = PostgresHook(postgres_conn_id='postgres_localhost')
+    conn = hook.get_conn()
+    cursor = conn.cursor()
+
+    create_table_if_not_exist()
+
+    for ticker in tickers:
+        date = context['execution_date'].strftime('%Y-%m-%d')
+        df_linear_regression = context['task_instance'].xcom_pull(task_ids='linear_regression_predictor',
+                                                                  key='stock_prediction_linear_regression')
+        df_logistic_regression = context['task_instance'].xcom_pull(task_ids='logistic_regression_predictor',
+                                                                    key='stock_prediction_logistic_regression')
+        df_LSTM = context['task_instance'].xcom_pull(task_ids='LSTM_predictor', key='stock_prediction_LSTM')
+        dfs = [df_linear_regression, df_logistic_regression, df_LSTM]
+        count = 0
+        for df in dfs:
+            predicted_labels = df[df['ticker'] == ticker]['predicted_labels'].values
+            count += predicted_labels
+        final_result = True if count >= 2 else False
+        predict_df = pd.DataFrame(columns=['date', 'ticker', 'predicted_labels'])
+        predict_df = pd.concat([predict_df, pd.DataFrame(
+            {'date': date, 'ticker': [ticker],
+             'predicted_labels': [final_result]})],
+                               ignore_index=True)
+
+        print(predict_df)
+        csv_data = StringIO()
+        predict_df.to_csv(csv_data, sep='\t', index=False, header=False)
+        csv_data.seek(0)
+        # Check for duplicates before inserting data
+        cursor.execute("""
+            SELECT COUNT(*) FROM stock_prediction
+            WHERE  Stock_Name = %s AND Date = %s
+        """, (ticker, date))
+
+        num_duplicates = cursor.fetchone()[0]
+        if num_duplicates > 0:
+            print(f"Skipping insertion of {num_duplicates} duplicate records.")
+        else:
+            cursor.copy_from(csv_data, 'stock_prediction', sep='\t', null='')
+            print('Result inserted into PostgreSQL database successfully!')
+
+    conn.commit()
+    conn.close()
 
 
 task1 = PythonOperator(

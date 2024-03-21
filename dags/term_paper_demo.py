@@ -16,7 +16,8 @@ import os
 default_args = {
     'owner': 'caozhen',
     'retries': 3,
-    'retry_delay': timedelta(minutes=2)
+    'retry_delay': timedelta(minutes=1),
+    'depends_on_past': True
 }
 
 # Define the DAG
@@ -37,8 +38,8 @@ def query_stock_info(**context):
     Task 1: Query stock information from Yahoo Finance
     """
 
-    end_date = context['execution_date'].strftime('%Y-%m-%d')
-    start_date = (context['execution_date'] - timedelta(days=1)).strftime('%Y-%m-%d')
+    end_date = (context['execution_date'] + timedelta(days=1)).strftime('%Y-%m-%d')
+    start_date = context['execution_date'].strftime('%Y-%m-%d')
 
     def get_stock(ticker, start_date, end_date, s_window, l_window):
         df = yf.download(ticker, start=start_date, end=end_date)
@@ -114,7 +115,6 @@ def query_stock_info(**context):
             WHERE Stock_Name = %s AND Date = ANY(%s)
         """, (ticker, df['Date'].tolist()))
         num_duplicates = cursor.fetchone()[0]
-
         if num_duplicates > 0:
             print(f"Data already exists, skip insertion.")
         else:
@@ -177,7 +177,7 @@ def processed_stock_data(**context):
     conn.close()
 
 
-def load_recent_data_from_postgres(ticker):
+def load_recent_data_from_postgres(ticker, date):
     """
     This function reads 5 most recent days stock info from database.
 
@@ -191,7 +191,18 @@ def load_recent_data_from_postgres(ticker):
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    cursor.execute(f"SELECT * FROM processed_stock_data WHERE Stock_Name = '{ticker}' ORDER BY date DESC LIMIT 5")
+    ten_days_ago = date - timedelta(days=10)
+
+    # Fetch data for the closest 5 days within the 10 days range
+    cursor.execute(f"""
+        SELECT * 
+        FROM processed_stock_data 
+        WHERE Stock_Name = '{ticker}' 
+        AND date <= '{date}' 
+        AND date >= '{ten_days_ago}'
+        ORDER BY ABS(date - '{date}') ASC
+        LIMIT 5
+    """)
     data = cursor.fetchall()
     columns = [desc[0] for desc in cursor.description]
     df = pd.DataFrame(data, columns=columns)
@@ -210,6 +221,7 @@ def linear_regression_predictor(**context):
     bucket_name = 'airflow'
 
     result_df = pd.DataFrame(columns=['ticker', 'predicted_labels'])
+    date = context['execution_date']
 
     for ticker in tickers:
         model_key = f'LinearRegression_{ticker}.pkl'
@@ -217,7 +229,7 @@ def linear_regression_predictor(**context):
         client = minio_hook.get_conn()
 
         # load data
-        recent_data = load_recent_data_from_postgres(ticker)
+        recent_data = load_recent_data_from_postgres(ticker, date)
         if len(recent_data) < 5:
             return -1
         recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
@@ -236,7 +248,7 @@ def linear_regression_predictor(**context):
 
         result_df = pd.concat([result_df, pd.DataFrame({'ticker': [ticker], 'predicted_labels': [predicted_labels]})],
                               ignore_index=True)
-    print(result_df)
+
     context['task_instance'].xcom_push(key='stock_prediction_linear_regression', value=result_df)
 
 
@@ -248,6 +260,7 @@ def logistic_regression_predictor(**context):
     bucket_name = 'airflow'
 
     result_df = pd.DataFrame(columns=['ticker', 'predicted_labels'])
+    date = context['execution_date']
 
     for ticker in tickers:
         model_key = f'LogisticRegression_{ticker}.pkl'
@@ -255,7 +268,7 @@ def logistic_regression_predictor(**context):
         client = minio_hook.get_conn()
 
         # load data
-        recent_data = load_recent_data_from_postgres(ticker)
+        recent_data = load_recent_data_from_postgres(ticker, date)
         if len(recent_data) < 5:
             return -1
         recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
@@ -270,7 +283,7 @@ def logistic_regression_predictor(**context):
 
         result_df = pd.concat([result_df, pd.DataFrame({'ticker': [ticker], 'predicted_labels': [predicted_labels]})],
                               ignore_index=True)
-    print(result_df)
+
     context['task_instance'].xcom_push(key='stock_prediction_logistic_regression', value=result_df)
 
 
@@ -282,10 +295,11 @@ def LSTM_predictor(**context):
     bucket_name = 'airflow'
 
     result_df = pd.DataFrame(columns=['ticker', 'predicted_labels'])
+    date = context['execution_date']
 
     for ticker in tickers:
         # load data
-        recent_data = load_recent_data_from_postgres(ticker)
+        recent_data = load_recent_data_from_postgres(ticker, date)
         if len(recent_data) < 5:
             return -1
         recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
@@ -309,7 +323,7 @@ def LSTM_predictor(**context):
 
         result_df = pd.concat([result_df, pd.DataFrame({'ticker': [ticker], 'predicted_labels': [predicted_labels]})],
                               ignore_index=True)
-    print(result_df)
+
     context['task_instance'].xcom_push(key='stock_prediction_LSTM', value=result_df)
 
 
@@ -342,7 +356,7 @@ def make_investment_decision(**context):
     create_table_if_not_exist()
 
     for ticker in tickers:
-        date = context['execution_date'].strftime('%Y-%m-%d')
+        date = (context['execution_date'] + timedelta(days=1)).strftime('%Y-%m-%d')
         df_linear_regression = context['task_instance'].xcom_pull(task_ids='linear_regression_predictor',
                                                                   key='stock_prediction_linear_regression')
         df_logistic_regression = context['task_instance'].xcom_pull(task_ids='logistic_regression_predictor',
@@ -355,14 +369,12 @@ def make_investment_decision(**context):
         for df in dfs:
             predicted_labels = df[df['ticker'] == ticker]['predicted_labels'].values
             count += predicted_labels
-        final_result = True if count >= 2 else False
+        final_result = 'Yes' if count >= 2 else 'No'
         predict_df = pd.DataFrame(columns=['date', 'ticker', 'predicted_labels'])
         predict_df = pd.concat([predict_df, pd.DataFrame(
             {'date': date, 'ticker': [ticker],
              'predicted_labels': [final_result]})],
                                ignore_index=True)
-
-        print(predict_df)
         csv_data = StringIO()
         predict_df.to_csv(csv_data, sep='\t', index=False, header=False)
         csv_data.seek(0)
@@ -402,7 +414,7 @@ model_sensor = S3KeySensor(
     bucket_name='airflow',
     bucket_key=[f'LinearRegression_{ticker}.pkl' for ticker in tickers] +
                [f'LogisticRegression_{ticker}.pkl' for ticker in tickers] +
-               [f'LSTM{ticker}.h5' for ticker in tickers],
+               [f'LSTM_{ticker}.h5' for ticker in tickers],
     aws_conn_id='minio_conn',
     mode='poke',
     poke_interval=10,

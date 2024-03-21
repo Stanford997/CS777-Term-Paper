@@ -116,7 +116,16 @@ docker run \
 
 ![Image 3](images/image-3.png)
 
+## 1.4 create connection using Airflow UI
 
+![Image 6](images/image-6.png)
+### 1.4.1 postgres connection
+
+<img src="images/image-7.png" style="zoom: 67%;" />
+
+### 1.4.2 minio connection
+
+<img src="images/image-8.png" style="zoom: 67%;" />
 
 # 2. Run
 
@@ -171,5 +180,67 @@ Make investment decision based on Task 3,4,5
 Only if the prediction results of more than or equal to two models are good stocks, the final result is a good stock.
 
 
+# 4. Dataset and Results
 
-### 
+## 4.1 dataset
+
+![Image 9](images/image-9.png)
+
+Our program will download the specified stocks dataset from Yahoo. Here is a screen shot of dataset:
+
+stock_name: Stock name in Yahoo, apple -> AAPL, Nvdia -> NVDA
+
+date: date of the stock
+
+open: open price is the price at which a particular stock starts trading when the stock market opens for the day
+
+high: the highest price of the stock in a day
+
+low: the lowest price of the stock in a day
+
+close: close price is the final price at which a particular stock is traded on a given trading day
+
+volume: the total number of shares or contracts traded
+
+adj_close: adjusted close price is the final price adjusted before the next trading day
+
+short_ma: short-term moving average of a financial metric
+
+long_ma: long-term moving average of a financial metric
+
+
+
+## 4.2 Results
+
+```postgresql
+SELECT psd.date,
+       psd.stock_name,
+       psd.open,
+       psd.close,
+       sp.prediction,
+       (psd.close - psd.open) AS earning
+FROM processed_stock_data psd
+JOIN stock_prediction sp ON psd.date = sp.date AND psd.stock_name = sp.stock_name
+WHERE psd.stock_name = 'NVDA';
+```
+
+You can use this SQL to see your stock results.
+
+Below are some examples of our results with stock NVDA, 
+
+### 4.2.1 NVDA
+
+![Image 10](images/image-10.png)
+3 correct, 6 wrong predictions
+
+### 4.2.2 GOOGL
+
+![Image 11](images/image-11.png)
+6 correct, 3 wrong predictions
+
+### 4.2.3 AMZN
+
+![Image 12](images/image-12.png)
+
+5 correct, 4 wrong predictions
+

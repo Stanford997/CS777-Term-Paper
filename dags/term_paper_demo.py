@@ -19,23 +19,26 @@ default_args = {
     'retry_delay': timedelta(minutes=2)
 }
 
+# Define the DAG
 dag = DAG(
-    'term_paper_demo_v2',
+    'term_paper_demo',
     default_args=default_args,
     description='demo for the term paper',
-    start_date=datetime(2023, 3, 15),
+    start_date=datetime(2024, 3, 1),
     schedule_interval='@daily'
 )
 
-tickers = ['AAPL']
+# Stock name
+tickers = ['NVDA', 'GOOGL', 'AMZN']
 
 
 def query_stock_info(**context):
-    # Task 1: Query stock information from Yahoo Finance
+    """
+    Task 1: Query stock information from Yahoo Finance
+    """
+
     end_date = context['execution_date'].strftime('%Y-%m-%d')
     start_date = (context['execution_date'] - timedelta(days=1)).strftime('%Y-%m-%d')
-    print(start_date)
-    print(end_date)
 
     def get_stock(ticker, start_date, end_date, s_window, l_window):
         df = yf.download(ticker, start=start_date, end=end_date)
@@ -86,6 +89,8 @@ def query_stock_info(**context):
             """)
         return
 
+    # Create a PostgresHook instance with the connection ID 'postgres_localhost'
+    # You need to build up the connection in airflow UI first
     hook = PostgresHook(postgres_conn_id='postgres_localhost')
     conn = hook.get_conn()
     cursor = conn.cursor()
@@ -95,7 +100,9 @@ def query_stock_info(**context):
     for ticker in tickers:
         df = get_stock(ticker, start_date=start_date, end_date=end_date, s_window=14, l_window=50)
         df.insert(0, 'Stock_Name', ticker)
-        context['task_instance'].xcom_push(key='stock_data', value=df)
+
+        # Push the data to Xcom
+        context['task_instance'].xcom_push(key=ticker, value=df)
 
         csv_data = StringIO()
         df.to_csv(csv_data, sep='\t', index=False, header=False)
@@ -109,7 +116,7 @@ def query_stock_info(**context):
         num_duplicates = cursor.fetchone()[0]
 
         if num_duplicates > 0:
-            print(f"Skipping insertion of {num_duplicates} duplicate records.")
+            print(f"Data already exists, skip insertion.")
         else:
             cursor.copy_from(csv_data, 'stock_info', sep='\t', null='')
             print('Data inserted into PostgreSQL database successfully!')
@@ -117,60 +124,69 @@ def query_stock_info(**context):
     conn.commit()
     conn.close()
 
-    print('Data inserted into PostgreSQL database successfully!')
 
-
-def clean_and_process_data(**context):
-    # Task 2: Clean and process the queried stock data
-    df = context['task_instance'].xcom_pull(task_ids='query_stock_info', key='stock_data')
-    if df.empty:
-        print("DataFrame is empty. Exiting clean_and_process_data function.")
-        return
-
-    df = df[['Stock_Name', 'Date', 'Open', 'Close']]
-    ticker = df['Stock_Name'].iloc[0]
-    csv_data = StringIO()
-    df.to_csv(csv_data, sep='\t', index=False, header=False)
-
-    def create_table_if_not_exist():
-        cursor.execute("""
-                CREATE TABLE IF NOT EXISTS processed_stock_data (
-                        Stock_Name VARCHAR(10),
-                        Date DATE,
-                        Open FLOAT,
-                        Close FLOAT
-                )
-            """)
-        return
+def processed_stock_data(**context):
+    """
+    Task 2: Save the projection of column ['Stock_Name', 'Date', 'Open', 'Close'] to table 'processed_stock_data'
+    """
 
     hook = PostgresHook(postgres_conn_id='postgres_localhost')
     conn = hook.get_conn()
     cursor = conn.cursor()
 
-    create_table_if_not_exist()
+    for ticker in tickers:
+        # Pull the data from Xcom
+        df = context['task_instance'].xcom_pull(task_ids='query_stock_info', key=ticker)
+        if df.empty:
+            print("DataFrame is empty. Exiting clean_and_process_data function.")
+            return
 
-    csv_data.seek(0)
+        df = df[['Stock_Name', 'Date', 'Open', 'Close']]
+        ticker = df['Stock_Name'].iloc[0]
+        csv_data = StringIO()
+        df.to_csv(csv_data, sep='\t', index=False, header=False)
 
-    # Check for duplicates before inserting data
-    cursor.execute("""
-        SELECT COUNT(*) FROM processed_stock_data 
-        WHERE Stock_Name = %s AND Date = ANY(%s)
-    """, (ticker, df['Date'].tolist()))
-    num_duplicates = cursor.fetchone()[0]
+        def create_table_if_not_exist():
+            cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS processed_stock_data (
+                            Stock_Name VARCHAR(10),
+                            Date DATE,
+                            Open FLOAT,
+                            Close FLOAT
+                    )
+                """)
+            return
 
-    if num_duplicates > 0:
-        print(f"Skipping insertion of {num_duplicates} duplicate records.")
-    else:
-        cursor.copy_from(csv_data, 'processed_stock_data', sep='\t', null='')
-        print('Data inserted into PostgreSQL database successfully!')
+        create_table_if_not_exist()
+
+        csv_data.seek(0)
+
+        cursor.execute("""
+            SELECT COUNT(*) FROM processed_stock_data 
+            WHERE Stock_Name = %s AND Date = ANY(%s)
+        """, (ticker, df['Date'].tolist()))
+        num_duplicates = cursor.fetchone()[0]
+
+        if num_duplicates > 0:
+            print(f"Data already exists, skip insertion.")
+        else:
+            cursor.copy_from(csv_data, 'processed_stock_data', sep='\t', null='')
+            print('Data inserted into PostgreSQL database successfully!')
 
     conn.commit()
     conn.close()
 
-    print('Filtered data inserted into PostgreSQL database successfully!')
-
 
 def load_recent_data_from_postgres(ticker):
+    """
+    This function reads 5 most recent days stock info from database.
+
+    Args:
+        ticker (String): stock name.
+
+    Returns:
+        df: dataframe of stock info.
+    """
     hook = PostgresHook(postgres_conn_id='postgres_localhost')
     conn = hook.get_conn()
     cursor = conn.cursor()
@@ -185,7 +201,11 @@ def load_recent_data_from_postgres(ticker):
 
 
 def linear_regression_predictor(**context):
-    # Task 3: load model and predict
+    """
+    Task 3: load linear regression model and predict
+    """
+    # You need to create the connection between minio and airflow using airflow UI
+    # You also need to start the minio container
     minio_conn_id = 'minio_conn'
     bucket_name = 'airflow'
 
@@ -196,18 +216,21 @@ def linear_regression_predictor(**context):
         minio_hook = S3Hook(minio_conn_id)
         client = minio_hook.get_conn()
 
+        # load data
+        recent_data = load_recent_data_from_postgres(ticker)
+        if len(recent_data) < 5:
+            return -1
+        recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
+        X = recent_data['Price_Diff'].values.reshape(1, -1)
+
         # Use the client to download the object
         obj = client.get_object(Bucket=bucket_name, Key=model_key)
-
         # Read the object's body directly into a BytesIO buffer without decoding
         model_stream = BytesIO(obj['Body'].read())
-
         # Load the model from the BytesIO buffer
         loaded_model = joblib.load(model_stream)
 
-        recent_data = load_recent_data_from_postgres(ticker)
-        recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
-        X = recent_data['Price_Diff'].values.reshape(1, -1)
+        # predict
         predicted_labels = loaded_model.predict(X)[0]
         predicted_labels = 1 if predicted_labels > 0 else 0
 
@@ -218,7 +241,9 @@ def linear_regression_predictor(**context):
 
 
 def logistic_regression_predictor(**context):
-    # Task 4: load model and predict
+    """
+    Task 4: load logistic regression model and predict
+    """
     minio_conn_id = 'minio_conn'
     bucket_name = 'airflow'
 
@@ -229,18 +254,18 @@ def logistic_regression_predictor(**context):
         minio_hook = S3Hook(minio_conn_id)
         client = minio_hook.get_conn()
 
-        # Use the client to download the object
-        obj = client.get_object(Bucket=bucket_name, Key=model_key)
-
-        # Read the object's body directly into a BytesIO buffer without decoding
-        model_stream = BytesIO(obj['Body'].read())
-
-        # Load the model from the BytesIO buffer
-        loaded_model = joblib.load(model_stream)
-
+        # load data
         recent_data = load_recent_data_from_postgres(ticker)
+        if len(recent_data) < 5:
+            return -1
         recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
         X = recent_data['Price_Diff'].values.reshape(1, -1)
+
+        obj = client.get_object(Bucket=bucket_name, Key=model_key)
+        model_stream = BytesIO(obj['Body'].read())
+        loaded_model = joblib.load(model_stream)
+
+        # predict
         predicted_labels = loaded_model.predict(X)[0]
 
         result_df = pd.concat([result_df, pd.DataFrame({'ticker': [ticker], 'predicted_labels': [predicted_labels]})],
@@ -250,17 +275,27 @@ def logistic_regression_predictor(**context):
 
 
 def LSTM_predictor(**context):
-    # Task 5: load model and predict
+    """
+    Task 5: load LSTM model and predict
+    """
     minio_conn_id = 'minio_conn'
     bucket_name = 'airflow'
 
     result_df = pd.DataFrame(columns=['ticker', 'predicted_labels'])
 
     for ticker in tickers:
+        # load data
+        recent_data = load_recent_data_from_postgres(ticker)
+        if len(recent_data) < 5:
+            return -1
+        recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
+        X = recent_data['Price_Diff'].values.reshape(1, -1)
+
         model_key = f'LSTM_{ticker}.h5'
         if os.path.exists(f'/tmp/{model_key}'):
             os.remove(f'/tmp/{model_key}')
         minio_hook = S3Hook(minio_conn_id)
+        # First download .h5 model file from minio and then load model
         local_model_path = minio_hook.download_file(key=model_key,
                                                     bucket_name=bucket_name,
                                                     local_path=None,
@@ -268,9 +303,7 @@ def LSTM_predictor(**context):
                                                     use_autogenerated_subdir=False)
         loaded_model = load_model(local_model_path)
 
-        recent_data = load_recent_data_from_postgres(ticker)
-        recent_data['Price_Diff'] = recent_data['close'] - recent_data['open']
-        X = recent_data['Price_Diff'].values.reshape(1, -1)
+        # predict
         predicted_labels = loaded_model.predict(X)[0]
         predicted_labels = 1 if predicted_labels > 0 else 0
 
@@ -281,7 +314,17 @@ def LSTM_predictor(**context):
 
 
 def make_investment_decision(**context):
-    # Task 6: Make investment decision based on Task 3,4,5
+    """
+    Task 6: Make investment decision based on Task 3,4,5
+    """
+    # Check if Task 3，4，5 has returned -1
+    task3_status = context['ti'].xcom_pull(task_ids='linear_regression_predictor')
+    task4_status = context['ti'].xcom_pull(task_ids='logistic_regression_predictor')
+    task5_status = context['ti'].xcom_pull(task_ids='LSTM_predictor')
+    if task3_status == -1 or task4_status == -1 or task5_status == -1:
+        print("Task 3, Task 4, or Task 5 returned -1. Exiting task.")
+        return -1
+
     def create_table_if_not_exist():
         cursor.execute("""
                 CREATE TABLE IF NOT EXISTS stock_prediction (
@@ -307,6 +350,8 @@ def make_investment_decision(**context):
         df_LSTM = context['task_instance'].xcom_pull(task_ids='LSTM_predictor', key='stock_prediction_LSTM')
         dfs = [df_linear_regression, df_logistic_regression, df_LSTM]
         count = 0
+        # Only if the prediction results of more than or equal to two models are good stocks,
+        # the final result is a good stock.
         for df in dfs:
             predicted_labels = df[df['ticker'] == ticker]['predicted_labels'].values
             count += predicted_labels
@@ -321,7 +366,7 @@ def make_investment_decision(**context):
         csv_data = StringIO()
         predict_df.to_csv(csv_data, sep='\t', index=False, header=False)
         csv_data.seek(0)
-        # Check for duplicates before inserting data
+
         cursor.execute("""
             SELECT COUNT(*) FROM stock_prediction
             WHERE  Stock_Name = %s AND Date = %s
@@ -329,7 +374,7 @@ def make_investment_decision(**context):
 
         num_duplicates = cursor.fetchone()[0]
         if num_duplicates > 0:
-            print(f"Skipping insertion of {num_duplicates} duplicate records.")
+            print(f"Result already exists, skip insertion.")
         else:
             cursor.copy_from(csv_data, 'stock_prediction', sep='\t', null='')
             print('Result inserted into PostgreSQL database successfully!')
@@ -346,8 +391,8 @@ task1 = PythonOperator(
 )
 
 task2 = PythonOperator(
-    task_id='clean_and_process_data',
-    python_callable=clean_and_process_data,
+    task_id='processed_stock_data',
+    python_callable=processed_stock_data,
     provide_context=True,
     dag=dag,
 )
@@ -355,7 +400,9 @@ task2 = PythonOperator(
 model_sensor = S3KeySensor(
     task_id='check_models_in_minio',
     bucket_name='airflow',
-    bucket_key=['LogisticRegression_AAPL.pkl', 'LinearRegression_AAPL.pkl', 'LSTM_AAPL.h5'],
+    bucket_key=[f'LinearRegression_{ticker}.pkl' for ticker in tickers] +
+               [f'LogisticRegression_{ticker}.pkl' for ticker in tickers] +
+               [f'LSTM{ticker}.h5' for ticker in tickers],
     aws_conn_id='minio_conn',
     mode='poke',
     poke_interval=10,
@@ -390,4 +437,5 @@ task6 = PythonOperator(
     provide_context=True,
     dag=dag,
 )
+
 task1 >> task2 >> model_sensor >> [task3, task4, task5] >> task6

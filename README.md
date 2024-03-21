@@ -47,9 +47,28 @@ docker compose up airflow-init
 
 in docker-cmopose.yaml replace image:
 
+and add `ports : 5432:5432` to map container's internal port 5432 to port 5432 on the host machine.
+
 ```yaml
 # image: ${AIRFLOW_IMAGE_NAME:-apache/airflow:2.8.3}
 image: ${AIRFLOW_IMAGE_NAME:-extending_airflow:latest}
+
+  postgres:
+    image: postgres:13
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    ports:
+      - 5432:5432
+    healthcheck:
+      test: [ "CMD", "pg_isready", "-U", "airflow" ]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    restart: always
 ```
 
 dockerfile

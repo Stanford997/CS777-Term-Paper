@@ -231,11 +231,13 @@ Below are some examples of our results with stock NVDA,
 ### 4.2.1 NVDA
 
 ![Image 10](images/image-10.png)
+
 3 correct, 6 wrong predictions
 
 ### 4.2.2 GOOGL
 
 ![Image 11](images/image-11.png)
+
 6 correct, 3 wrong predictions
 
 ### 4.2.3 AMZN

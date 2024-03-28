@@ -265,3 +265,61 @@ Below are some examples of our results with stock NVDA,
 
 5 correct, 4 wrong predictions
 
+# 5. Run on Google Cloud
+
+## 5.1 create composer(airflow on GC)
+
+https://console.cloud.google.com/composer/
+
+![Image 13](images/image-13.png)
+
+Create composer2.
+
+![Image 14](images/image-14.png)
+
+![Image 15](images/image-15.png)
+
+You can add python packages using PYPI. Then composer will download for you automatically.
+
+
+
+## 5.2 create postgres database
+
+![Image 16](images/image-16.png)
+
+You need to add your airflow ip to authorized networks here.
+
+![Image 17](images/image-17.png)
+
+![Image 18](images/image-18.png)
+
+And create connection in Airflow UI using the postgres database public IP address.
+
+## 5.3 Google Cloud Storage
+
+![Image 19](images/image-19.png)
+
+Here allow public access to the bucket and save the models in the bucket.
+
+```python
+gcs_hook = GoogleCloudStorageHook(google_cloud_conn_id)
+# First download .h5 model file from minio and then load model
+model_stream = gcs_hook.download(bucket_name=bucket_name, object_name=model_key, filename=f'/tmp/{model_key}')
+```
+
+Because we use GoogleCloudStorageHook to download the model.
+
+## 5.4 Composer Dashboard
+
+**Logs:**
+
+![Image 20](images/image-20.png)
+
+**Dags:**
+
+![Image 21](images/image-21.png)
+
+**Monitor:**
+
+![Image 22](images/image-22.png)
+
